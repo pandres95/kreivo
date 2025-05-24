@@ -25,6 +25,13 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-all-crates: true
+          key: benchmarking
+
       - name: Release build with `runtime-benchmarks`
         uses: actions-rs/cargo@v1
         with:
@@ -35,7 +42,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.run_id }}-runtime
-          path: ./target/production/wbuild/kreivo-runtime/${{ env.RUNTIME_NAME }}
+          path: ./target/production/wbuild/kreivo-runtime/kreivo_runtime.compact.compressed.wasm
 
   provision:
     needs: build
@@ -84,11 +91,12 @@ jobs:
           az vm create \
             --name gh-vm-${{ github.run_id }} \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-            --image Ubuntu2204 \
+            --public-ip-address "" \
+            --image Ubuntu2404 \
+            --generate-ssh-keys \
             --size Standard_D16s_v5 \
             --os-disk-size-gb 32 \
             --admin-username azureuser \
-            --generate-ssh-keys \
             --custom-data cloud-init.txt \
             --tags "github_label=vm-${{ github.run_id }}"
 
@@ -117,7 +125,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ github.run_id }}-runtime
-          path: ./target/release
+          path: ./target/release/wbuild/kreivo-runtime
 
       - name: Use Stable
         uses: actions-rs/toolchain@v1
@@ -134,7 +142,8 @@ jobs:
           args: --git https://github.com/paritytech/polkadot-sdk.git --branch stable2503 frame-omni-bencher
 
       - run: |
-          just benchmarks
+          just benchmark pallet_scheduler
+          just benchmark pallet_communities
 
       - uses: actions/upload-artifact@v4
         with:
@@ -181,9 +190,10 @@ jobs:
           VM_NAME=gh-vm-${{ github.run_id }}
 
           echo "🧹 Deleting VM: $VM_NAME"
-
-          # Get NIC ID
+          
+          # ─── Retrieve NIC ─────────────────────────────────────────
           NIC_ID=$(az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --query 'networkProfile.networkInterfaces[0].id' -o tsv || echo "")
+          NIC_NAME=""
           if [ -n "$NIC_ID" ]; then
             NIC_NAME=$(basename "$NIC_ID")
           else
@@ -191,21 +201,14 @@ jobs:
             NIC_NAME=""
           fi
 
-          # Get public IP ID
-          if [ -n "$NIC_NAME" ]; then
-            IP_ID=$(az network nic show --resource-group "$RESOURCE_GROUP" --name "$NIC_NAME" --query 'ipConfigurations[0].publicIpAddress.id' -o tsv || echo "")
-            echo "IP_ID is \"$IP_ID\""
-            if [ -n "$IP_ID" ]; then
-              IP_NAME=$(basename "$IP_ID")
-            else
-              echo "⚠️  Public IP ID not found"
-              IP_NAME=""
-            fi
-          else
-            IP_NAME=""
-          fi
+          # ─── Retrieve OS Disk ─────────────────────────────────────
+          DISK_NAME=$(az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --query 'storageProfile.osDisk.name' -o tsv || echo "⚠️  OS Disk not found")
 
-          # Get VNet from NIC
+          # ─── Retrieve NSG ─────────────────────────────────────────
+          NSG_ID=$(az network nic show --resource-group "$RESOURCE_GROUP" --name "$NIC_NAME" --query 'networkSecurityGroup.id' -o tsv || echo "")
+          NSG_NAME=$(basename "$NSG_ID")
+
+          # ─── Retrieve VNet from NIC ───────────────────────────────
           VNET_NAME=""
           if [ -n "$NIC_NAME" ]; then
             SUBNET_ID=$(az network nic show --resource-group "$RESOURCE_GROUP" --name "$NIC_NAME" --query 'ipConfigurations[0].subnet.id' -o tsv || echo "")
@@ -213,9 +216,6 @@ jobs:
               VNET_NAME=$(echo "$SUBNET_ID" | cut -d'/' -f9)
             fi
           fi
-
-          # Get OS disk name
-          DISK_NAME=$(az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --query 'storageProfile.osDisk.name' -o tsv || echo "")
 
           # Delete VM
           echo "🗑️  Deleting VM..."
@@ -227,16 +227,16 @@ jobs:
             az network nic delete --resource-group "$RESOURCE_GROUP" --name "$NIC_NAME" || echo "⚠️  NIC not found"
           fi
 
-          # Delete Public IP
-          if [ -n "$IP_NAME" ]; then
-            echo "🗑️  Deleting Public IP: $IP_NAME"
-            az network public-ip delete --resource-group "$RESOURCE_GROUP" --name "$IP_NAME" || echo "⚠️  Public IP not found"
-          fi
-
           # Delete OS disk
           if [ -n "$DISK_NAME" ]; then
             echo "🗑️  Deleting OS disk: $DISK_NAME"
             az disk delete --resource-group "$RESOURCE_GROUP" --name "$DISK_NAME" --yes || echo "⚠️  Disk not found"
+          fi
+
+          # Delete NSG
+          if [ -n "$NSG_NAME" ]; then
+            echo "🗑️  Deleting NSG: $NSG_NAME"
+            az network nsg delete --resource-group "$RESOURCE_GROUP" --name "$NSG_NAME" || echo "⚠️  NSG not found"
           fi
 
           # Delete VNet
