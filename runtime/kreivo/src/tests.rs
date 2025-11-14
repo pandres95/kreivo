@@ -1,20 +1,39 @@
-use super::Runtime;
+use super::{
+	config::{communities::memberships::CommunityMembershipsInstance, system::CommunityLookup, TreasuryAccount},
+	constants::currency::EXISTENTIAL_DEPOSIT,
+	xcm_config::*,
+	Balances, Communities, CommunitiesManager, CommunityMemberships, FungibleAssetLocation, Runtime, RuntimeOrigin,
+	CENTS, UNITS,
+};
+
+use frame_support::{
+	assert_ok,
+	traits::{fungible::Mutate, nonfungibles_v2::Inspect},
+};
+use pallet_communities_manager::TankConfig;
+use parachains_common::AccountId;
+use parity_scale_codec::Encode;
+use runtime_constants::time::WEEKS;
+use sp_core::crypto::AccountId32;
+use sp_io::TestExternalities;
+use sp_runtime::{traits::StaticLookup, BoundedVec};
+use xcm_executor::{WeighedMessage, XcmExecutor};
 
 macro_rules! assert_call_size {
 	($pallet: ident) => {
 		println!(
 			"size_of<{}::Call>: {}",
 			stringify!($pallet),
-			&sp_std::mem::size_of::<$pallet::Call<Runtime>>(),
+			&core::mem::size_of::<$pallet::Call<Runtime>>(),
 		);
-		assert!(sp_std::mem::size_of::<$pallet::Call<Runtime>>() as u32 <= 1024);
+		assert!(core::mem::size_of::<$pallet::Call<Runtime>>() as u32 <= 1024);
 	};
 	($pallet: ident, $instance: path) => {
 		println!(
 			"size_of<$pallet::Call>: {}",
-			&sp_std::mem::size_of::<$pallet::Call<Runtime, $instance>>(),
+			&core::mem::size_of::<$pallet::Call<Runtime, $instance>>(),
 		);
-		assert!(sp_std::mem::size_of::<$pallet::Call<Runtime, $instance>>() as u32 <= 1024);
+		assert!(core::mem::size_of::<$pallet::Call<Runtime, $instance>>() as u32 <= 1024);
 	};
 }
 
@@ -74,4 +93,132 @@ fn runtime_sanity_call_does_not_exceed_1kb() {
 	assert_call_size!(pallet_treasury);
 	// Payments: pallet_payments = 60
 	assert_call_size!(pallet_payments);
+}
+
+#[test]
+fn ensure_copying_membership_attributes_works() {
+	TestExternalities::default().execute_with(|| {
+		if cfg!(feature = "runtime-benchmarks") {
+			// Note: Need to cover the deposit when the `runtime-benchmarks` feature is set.
+			assert_ok!(Balances::mint_into(
+				&TreasuryAccount::get(),
+				EXISTENTIAL_DEPOSIT + 10 * CENTS
+			));
+		}
+
+		// Create some memberships.
+		assert_ok!(CommunitiesManager::create_memberships(
+			RuntimeOrigin::root(),
+			10,
+			0,
+			CENTS,                 // Any price works
+			TankConfig::default(), // default means unlimited tank — also, the only publicly exposed constructor ;)
+			Some(8 * WEEKS),       // expires in
+		));
+
+		const ALICE: AccountId32 = AccountId32::new([1; 32]);
+		const BOB: AccountId32 = AccountId32::new([2; 32]);
+		assert_ok!(Balances::mint_into(&ALICE, UNITS));
+		assert_ok!(Balances::mint_into(&BOB, UNITS));
+
+		assert_ok!(CommunitiesManager::register(
+			RuntimeOrigin::root(),
+			1,
+			BoundedVec::try_from(b"First Community".to_vec()).expect("meets max length; qed"),
+			CommunityLookup::unlookup(ALICE),
+			// Use default values for decision method and track info
+			None,
+			None,
+		));
+
+		// Let's load some amount to the community, so the community can buy memberships
+		// itself.
+		assert_ok!(Balances::mint_into(&Communities::community_account(&1), UNITS));
+
+		assert_ok!(Communities::dispatch_as_account(
+			RuntimeOrigin::signed(ALICE),
+			Box::new(
+				pallet_nfts::Call::<Runtime, CommunityMembershipsInstance>::buy_item {
+					collection: 0,
+					item: 0,
+					bid_price: CENTS
+				}
+				.into()
+			)
+		));
+
+		assert_ok!(Communities::add_member(
+			RuntimeOrigin::signed(ALICE),
+			CommunityLookup::unlookup(BOB)
+		));
+
+		let key: Vec<u8> = b"membership_gas".to_vec();
+		assert!(CommunityMemberships::system_attribute(&1, Some(&0), &key.encode()).is_some());
+	})
+}
+
+#[test]
+fn ensure_asset_creation_when_depositing_nonexisting_assets_works() {
+	use frame_support::traits::fungibles::{roles::Inspect as _, Inspect as _};
+	use xcm::latest::prelude::*;
+
+	TestExternalities::default().execute_with(|| {
+		let asset_id = FungibleAssetLocation::Sibling(virto_common::Para {
+			id: 1000,
+			pallet: 50,
+			index: 42,
+		});
+
+		assert!(!super::Assets::asset_exists(asset_id));
+
+		assert!(matches!(
+			XcmExecutor::<XcmConfig>::execute(
+				Location::new(1, [Parachain(1000)]),
+				WeighedMessage::new(
+					Weight::zero(),
+					Xcm(vec![
+						ReserveAssetDeposited(
+							vec![
+								Asset {
+									id: Location::parent().into(),
+									fun: Fungible(10000000000)
+								},
+								Asset {
+									id: Location::new(1, [Parachain(1000), PalletInstance(50), GeneralIndex(42)])
+										.into(),
+									fun: Fungible(10000000000)
+								},
+							]
+							.into()
+						),
+						ClearOrigin,
+						BuyExecution {
+							fees: Asset {
+								id: Location::parent().into(),
+								fun: Fungible(10000000000)
+							},
+							weight_limit: Unlimited,
+						},
+						DepositAsset {
+							assets: Wild(All),
+							beneficiary: Location::new(
+								0,
+								[AccountId32 {
+									network: None,
+									id: [1u8; 32],
+								}]
+							)
+						}
+					])
+				),
+				&mut [0u8; 32],
+				Weight::zero(),
+			),
+			Outcome::Complete { .. }
+		));
+
+		assert!(super::Assets::asset_exists(asset_id));
+		assert_eq!(super::Assets::owner(asset_id), Some(TreasuryAccount::get()));
+		assert_eq!(super::Assets::balance(asset_id, AccountId::new([1u8; 32])), 10000000000);
+	})
 }

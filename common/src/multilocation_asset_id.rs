@@ -1,3 +1,4 @@
+use parity_scale_codec::DecodeWithMemTracking;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "scale")]
@@ -7,7 +8,10 @@ use {
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "scale", derive(Encode, Decode, MaxEncodedLen, TypeInfo))]
+#[cfg_attr(
+	feature = "scale",
+	derive(Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo)
+)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum FungibleAssetLocation {
 	Here(u32),
@@ -16,16 +20,22 @@ pub enum FungibleAssetLocation {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "scale", derive(Encode, Decode, MaxEncodedLen, TypeInfo))]
+#[cfg_attr(
+	feature = "scale",
+	derive(Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo)
+)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Para {
-	id: u16,
-	pallet: u8,
-	index: u32,
+	pub id: u16,
+	pub pallet: u8,
+	pub index: u32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "scale", derive(Encode, Decode, MaxEncodedLen, TypeInfo))]
+#[cfg_attr(
+	feature = "scale",
+	derive(Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo)
+)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum NetworkId {
 	Polkadot,
